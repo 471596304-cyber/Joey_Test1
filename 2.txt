@@ -1,0 +1,186 @@
+const KEY_NAME = "deepseek-balance-api-key";
+const BALANCE_URL = "https://api.deepseek.com/user/balance";
+
+async function prepareKey() {
+  if (config.runsInWidget) {
+    if (!Keychain.contains(KEY_NAME)) {
+      throw new Error("请先在 Scriptable 内运行脚本，设置 API Key");
+    }
+    return true;
+  }
+
+  if (Keychain.contains(KEY_NAME)) {
+    const menu = new Alert();
+    menu.title = "DeepSeek 余额";
+    menu.message = "查询余额，或更换已保存的 API Key。";
+    menu.addAction("查询余额");
+    menu.addAction("更换 API Key");
+    menu.addCancelAction("取消");
+
+    const choice = await menu.presentSheet();
+
+    if (choice === -1) return false;
+    if (choice === 0) return true;
+  }
+
+  const input = new Alert();
+  input.title = "设置 DeepSeek API Key";
+  input.message =
+    "仅保存在 Scriptable Keychain 中，请勿分享给他人。";
+  input.addSecureTextField("粘贴 API Key");
+  input.addAction("保存并查询");
+  input.addCancelAction("取消");
+
+  const choice = await input.presentAlert();
+  if (choice === -1) return false;
+
+  const key = input.textFieldValue(0).trim();
+  if (!key) {
+    throw new Error("API Key 不能为空，请重新运行脚本");
+  }
+
+  Keychain.set(KEY_NAME, key);
+  return true;
+}
+
+async function fetchBalance() {
+  const request = new Request(BALANCE_URL);
+  request.method = "GET";
+  request.timeoutInterval = 20;
+  request.headers = {
+    Authorization: "Bearer " + Keychain.get(KEY_NAME),
+    Accept: "application/json"
+  };
+
+  let body;
+  try {
+    body = await request.loadString();
+  } catch (error) {
+    throw new Error("网络请求失败，请检查网络后重试");
+  }
+
+  const status = request.response
+    ? request.response.statusCode
+    : 0;
+
+  if (status === 401) {
+    throw new Error("API Key 无效，请在 App 内更换");
+  }
+  if (status === 403) {
+    throw new Error("访问被拒绝，请检查账户权限");
+  }
+  if (status === 429) {
+    throw new Error("请求过于频繁，请稍后重试");
+  }
+  if (status < 200 || status >= 300) {
+    throw new Error("查询失败，HTTP 状态码：" + status);
+  }
+
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch (error) {
+    throw new Error("接口返回的内容不是有效 JSON");
+  }
+
+  if (
+    !data ||
+    typeof data.is_available !== "boolean" ||
+    !Array.isArray(data.balance_infos) ||
+    data.balance_infos.length === 0
+  ) {
+    throw new Error("余额数据结构异常，请检查接口");
+  }
+
+  for (const item of data.balance_infos) {
+    if (
+      !item ||
+      typeof item.currency !== "string" ||
+      !item.currency.trim() ||
+      typeof item.total_balance !== "string" ||
+      !item.total_balance.trim() ||
+      !Number.isFinite(Number(item.total_balance))
+    ) {
+      throw new Error("接口返回的币种或余额格式异常");
+    }
+  }
+
+  return data;
+}
+
+function addText(widget, text, size, color, bold) {
+  const label = widget.addText(text);
+  label.font = bold
+    ? Font.boldSystemFont(size)
+    : Font.systemFont(size);
+  label.textColor = new Color(color);
+  return label;
+}
+
+async function main() {
+  const widget = new ListWidget();
+  widget.backgroundColor = new Color("#142033");
+  widget.setPadding(14, 14, 14, 14);
+
+  addText(widget, "DeepSeek 余额", 16, "#FFFFFF", true);
+  widget.addSpacer(10);
+
+  try {
+    const ready = await prepareKey();
+    if (!ready) return;
+
+    const data = await fetchBalance();
+
+    for (const item of data.balance_infos) {
+      const label = addText(
+        widget,
+        item.total_balance + " " + item.currency,
+        22,
+        "#63E6BE",
+        true
+      );
+      label.lineLimit = 1;
+      label.minimumScaleFactor = 0.5;
+      widget.addSpacer(4);
+    }
+
+    addText(
+      widget,
+      data.is_available ? "API 账户可用" : "API 账户不可用",
+      11,
+      data.is_available ? "#CBD5E1" : "#FCA5A5",
+      false
+    );
+
+    widget.addSpacer();
+
+    const time = new Date().toLocaleTimeString("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+
+    addText(widget, "查询成功：" + time, 10, "#94A3B8", false);
+  } catch (error) {
+    addText(widget, "查询未成功", 16, "#FCA5A5", true);
+    widget.addSpacer(6);
+
+    const message = error instanceof Error
+      ? error.message
+      : "发生未知错误，请在 App 内重新运行";
+
+    addText(widget, message, 11, "#CBD5E1", false);
+    widget.addSpacer();
+  }
+
+  // 这是建议刷新时间，实际刷新由 iOS 调度。
+  widget.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000);
+
+  Script.setWidget(widget);
+
+  if (!config.runsInWidget) {
+    await widget.presentSmall();
+  }
+}
+
+await main();
+Script.complete();
